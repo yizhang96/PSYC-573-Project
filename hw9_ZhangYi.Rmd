@@ -1,0 +1,284 @@
+---
+title: "HW 9"
+shorttitle: "A Bayesian replication of Forbes & Stellar (2021)"
+author:
+  - name: "Yi Zhang"
+    affiliation: "1"
+affiliation:
+  - id: "1"
+    institution: "University of Southern California"
+authornote:
+abstract:
+header-includes:
+  - \usepackage{siunitx}
+csl: "`r system.file('rmd', 'apa7.csl', package = 'papaja')`"
+documentclass: "apa7"
+output: papaja::apa6_pdf
+bibliography: "references.bib"
+---
+
+<!-- This is a comment -->
+<!-- To use the `papaja::apa6_pdf` format, follow the instruction in https://github.com/crsh/papaja to install the `papaja` package -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r load-pkg, include = FALSE, message = FALSE}
+library(papaja)
+library(ggplot2)  # for plots
+library(magrittr)  # for `%>%` operator
+library(here)
+library(haven)  # for reading sav files
+library(modelsummary)  # for summarizing data
+library(rstan)
+rstan_options(auto_write = TRUE)  # save compiled STAN object
+options(mc.cores = 2)  # use two cores
+library(brms)
+library(posterior)
+library(bayesplot)
+library(kableExtra)
+theme_set(theme_classic() +
+    theme(panel.grid.major.y = element_line(color = "grey92")))
+```
+
+# Introduction
+
+## Research Question
+
+> How does relationship context affect moral judgment and moral emotion?
+
+# Method
+
+> Each participant was randomly assigned to learn about moral transgressions committed by either 1) their romantic partner, 2) a close friend, or 3) a stranger. Participants first rated their partner's morality and then learned about moral transgressions ostensibly committed by their partner. Finally, participants rated their partner's morality again and reported their own emotions.
+
+## Variables
+
+- `Pair_ID`: ID for each dyad (romantic partners, friends, or strangers)
+- `Group`: Condition. 1: Romantic Partner, 2: Close friend, 3: Stranger
+- `Other1Moral`: Morality rating at baseline. "After learning this information, please rate the other person on the following traits. (honest, trustworthy, fair, unethical)" 1 (Not at all) to 5 (Extremely)
+- `Other2Moral`: Morality rating after learning about transgression. "After learning this information, please rate the other person on the following traits. (honest, trustworthy, fair, unethical)" 1 (Not at all) to 5 (Extremely)
+- `SCEmo`: Self-conscious emotions after learning about transgression. "After learning this information, how much do you feel the following emotions your self? (Embarrassed, Shame, Guilt)" 1: None at all, 10: As much as I've ever felt.
+
+
+```{r import data}
+# Import data
+morality_data <- read_sav("/Users/yizhang/Desktop/USC/Coursework/Spring22/Bayesian/PSYC-573 Project/data/Study4_FinalData.sav")
+#exclude unqualified subjects
+morality_data$Group <- as.factor(morality_data$Group)
+morality_data <- morality_data[morality_data$`filter_$` == 1, ]
+```
+
+## Variable Summary
+
+<!-- You can use \@ref(tab:xx) to reference a table with the chunk label "xx" -->
+
+Table\ \@ref(tab:summ-var) shows the summary statistics of moral evaluations and self-conscious emotion ratings by conditions.
+
+```{r summ-var}
+datasummary((Other1Moral + Other2Moral + SCEmo)  * 
+                (N + Mean + SD + Min + Max) ~ 
+                factor(Group, labels = c("Romantic Partner", "Friend", "Stranger")),
+            data = morality_data,
+            # The `caption` argument adds caption to a table.
+            caption = "Summary Statistics") %>%
+    # add table note
+    add_footnote("SD = standard deviation", notation = "none")
+```
+
+## Model
+
+Let $Y$ = `Other2Moral`, `SCEmo`, $G$ = `Group`
+
+For each of the DVs, I fit the following model:
+
+$$
+  \begin{aligned}
+    Y_{j, G = romantic} & \sim N(\theta_{1j}, \sigma) \\
+    Y_{j, G = friend} & \sim N(\theta_{2j}, \sigma)\\
+    Y_{j, G = stranger} & \sim N(\theta_{3j}, \sigma)\\
+    \theta_{1j}& \sim N(\mu_1, \sigma_1)\\
+    \theta_{2j} & \sim N(\mu_2, \sigma_2)\\
+    \theta_{3j} & \sim N(\mu_3, \sigma_3)
+  \end{aligned}
+$$
+
+Below are the priors for the `OtherMoralDif` variable, based on data from Study 1.
+$$
+  \begin{aligned}
+    \mu_1 & \sim N(2.61,2)\\
+    \mu_2 & \sim N(2.52,2)\\
+    \mu_2 & \sim N(2.11,2)\\
+    \sigma & \sim N^+(0, 2)\\
+    \sigma_1 & \sim N^+(1.6, 2) \\
+    \sigma_2 & \sim N^+(1.35, 2)\\
+    \sigma_2 & \sim N^+(1.35, 2)
+  \end{aligned}
+$$
+
+Below are the priors for the `SCEmo` variable.
+$$
+  \begin{aligned}
+    \mu_1 & \sim N(2.89,2)\\
+    \mu_2 & \sim N(2.42,2)\\
+    \mu_2 & \sim N(1.85,2)\\
+    \sigma & \sim N^+(0, 2)\\
+    \sigma_1 & \sim N^+(1.17, 2) \\
+    \sigma_2 & \sim N^+(1.07, 2)\\
+    \sigma_2 & \sim N^+(1.06, 2)
+  \end{aligned}
+$$
+
+## Running Stan
+
+We ran a separate model for each DV. In each model, we used 4 chains, each with 4,000 iterations (first 2,000 as warm-ups). For this preliminary analysis, I did not control for baseline moral judgment (`Other2Moral`). I also treated participants in the same dyad individuals, without taking into account the within-dyadic correlations.
+
+```{r m1, results = "hide"}
+#get rid of NA
+morality_data.noNA <- morality_data[!is.na(morality_data$Other2Moral), ]
+
+# 1. form the data list for Stan
+stan_dat <- with(morality_data.noNA,
+    list(N1 = sum(Group == 1),
+         N2 = sum(Group == 2),
+         N3 = sum(Group == 3),
+         y1 = Other2Moral[which(Group == 1)],
+         y2 = Other2Moral[which(Group == 2)],
+         y3 = Other2Moral[which(Group == 3)]
+         )
+)
+# 2. Run Stan
+m1 <- stan(
+    file = "/Users/yizhang/Desktop/USC/Coursework/Spring22/Bayesian/PSYC-573 Project/hw9.stan",
+    data = stan_dat,
+    seed = 1234,  # for reproducibility
+    iter = 4000
+)
+```
+
+```{r m2, results = "hide"}
+#get rid of NA
+morality_data.noNA2 <- morality_data[!is.na(morality_data$SCEmo), ]
+
+# 1. form the data list for Stan
+stan_dat2 <- with(morality_data.noNA2,
+    list(N1 = sum(Group == 1),
+         N2 = sum(Group == 2),
+         N3 = sum(Group == 3),
+         y1 = SCEmo[which(Group == 1)],
+         y2 = SCEmo[which(Group == 2)],
+         y3 = SCEmo[which(Group == 3)]
+         )
+)
+# 2. Run Stan
+m2 <- stan(
+    file = "/Users/yizhang/Desktop/USC/Coursework/Spring22/Bayesian/PSYC-573 Project/hw9_2.stan",
+    data = stan_dat2,
+    seed = 1234,  # for reproducibility
+    iter = 4000
+)
+```
+
+```{r m1 brms, eval = FALSE, include = FALSE}
+#Fitting model using brms (NEED TO REVISE CODE)
+morality_data.noNA <- morality_data[!is.na(morality_data$Other2Moral) &
+                                      !is.na(morality_data$Other1Moral_GC),]
+
+#create stan code
+stan_code_test <- make_stancode(Other2Moral ~ Group + Other1Moral_GC + (1|Pair_ID),
+                                data = morality_data.noNA)
+#fitting model for each condition separately
+stan_code_test <- make_stancode(Other2Moral ~ Other1Moral_GC + (1|Pair_ID),
+                                data = morality_data.noNA%>%
+                                  filter(Group==1))
+#fit brm model
+m1_brm <- brm(
+    # Y (vote) = beta0 + beta1 (growth)
+    Other2Moral ~ Other1Moral_GC + (1|Group),
+    data = morality_data.noNA,
+    # Normal distribution with identity link
+    family = gaussian(link = "identity"),
+    # Overwrite the default priors
+    prior = c(
+        # prior for beta0
+        prior(normal(3, 2), class = "Intercept"),
+        # prior for beta1 (and beta2, ..., if > 1 predictors)
+        prior(normal(0, 1), class = "b"),
+        # prior for sigma
+        prior(student_t(4, 0, 5), class = "sigma")
+    ),
+    control = list(adapt_delta = 0.99),
+    sample_prior = TRUE,  # also sample the prior distributions
+    iter = 10000,  # default is 4 chains, 2000 iterations each
+    seed = 1234
+)
+
+summary(m1_brm)
+test_draws <- as_draws(m1_brm)
+prior_summary(m1_brm)
+mcmc_areas(m1_brm, pars = c("b_Group2","b_Group3","b_Other1Moral_GC"))
+```
+
+# Results
+
+<!-- Use [@xxx] for parenthetical citation. xxx is the label for the bibTeX citation key in "references.bib." See https://bookdown.org/yihui/rmarkdown-cookbook/bibliography.html for more information. -->
+<!-- You can use \@ref(fig:xx) to reference a figure with the chunk label "xx" -->
+
+```{r rank-hist-m1, fig.cap = "Rank histograms showing convergence of the MCMC chains for moral judgment."}
+mcmc_rank_hist(m1, pars = c("mu1", "mu2", "mu3", "sigma1", "sigma2", "sigma3"))
+```
+
+```{r rank-hist-m2, fig.cap = "Rank histograms showing convergence of the MCMC chains for self-conscious emotions."}
+mcmc_rank_hist(m2, pars = c("mu1", "mu2", "mu3", "sigma1", "sigma2", "sigma3"))
+```
+
+As shown in the rank histograms [@vehtari2021] in Figure\ \@ref(fig:rank-hist-m1) and Figure\ \@ref(fig:rank-hist-m2), the chains mixed well for both DVs.
+
+Table\ \@ref(tab:summ-m1) shows the posterior distributions of $\mu_1$, $\mu_2$, $\mu_3$, $\sigma_1$, $\sigma_2$, $\sigma_3$ for `Other2Moral` and the difference between each combinations of the three groups.
+
+Table\ \@ref(tab:summ-m2) shows the posterior distributions of $\mu_1$, $\mu_2$, $\mu_3$, $\sigma_1$, $\sigma_2$, $\sigma_3$ for `SCEmo` and the difference between each combinations of the three groups.
+
+```{r summ-m2}
+summ_m1 <- as_draws_df(m1) %>%
+    subset_draws(variable = c("mu1", "mu2", "mu3", "sigma1", "sigma2", "sigma3")) %>%
+    mutate_variables(`mu2 - mu1` = mu2 - mu1, #difference between group 2 and group 1
+                     `mu3 - mu1` = mu3 - mu1, #dif between group 3 and group 1
+                     `mu3 - mu2` = mu3 - mu2) %>% #dif between group 3 and group 2
+    summarise_draws()
+#summ_m1 <- as_draws_df(m1_brm) %>%
+#    subset_draws(variable = c("b_Intercept", "b_Group2", "b_Group3", 
+#                              "b_Other1Moral_GC", "sigma")) %>%
+#    summarise_draws()
+# Use `papaja::apa_table()` for APA formatted tables
+apa_table(summ_m1, digits = 2,
+          # table caption
+          caption = "Posterior summary of model parameters for moral judgment.",
+          # table note
+          note = "sd = standard deviation. ess = effective sample size.")
+```
+
+```{r summ-m1}
+summ_m2 <- as_draws_df(m2) %>%
+    subset_draws(variable = c("mu1", "mu2", "mu3", "sigma1", "sigma2", "sigma3")) %>%
+    mutate_variables(`mu2 - mu1` = mu2 - mu1, #difference between group 2 and group 1
+                     `mu3 - mu1` = mu3 - mu1, #dif between group 3 and group 1
+                     `mu3 - mu2` = mu3 - mu2) %>% #dif between group 3 and group 2
+    summarise_draws()
+
+apa_table(summ_m2, digits = 2,
+          # table caption
+          caption = "Posterior summary of model parameters for self-conscious emotions.",
+          # table note
+          note = "sd = standard deviation. ess = effective sample size.")
+```
+
+The analysis showed that on average, participants in the romantic partner and close friend groups made less negative evaluations for their partners compared with participants in the stranger group. The posterior mean of the difference in moral judgment between the romantic partner and stranger groups was `r round(summ_m1$mean[8], 2)` and a 90% CI of [`r round(summ_m1$q5[8], 2)`, `r round(summ_m1$q95[8], 2)`]. The posterior mean of the difference in moral judgment between the friend and stranger groups was `r round(summ_m1$mean[9], 2)` and a 90% CI of [`r round(summ_m1$q5[9], 2)`, `r round(summ_m1$q95[9], 2)`].
+
+In the meantime, participants in the friend and stranger groups experienced less self-conscious emotions after learning that their partners had committed moral transgressions. The posterior mean of the difference between the romantic partner and friend groups was `r round(summ_m2$mean[7], 2)`, with a 90% CI of [`r round(summ_m2$q5[7], 2)`, `r round(summ_m2$q95[7], 2)`]. The posterior mean of difference between the romantic partner and stranger groups was `r round(summ_m2$mean[8], 2)`, with a 90% CI of [`r round(summ_m2$q5[8], 2)`, `r round(summ_m2$q95[8], 2)`].
+
+\newpage
+
+# References
+
+::: {#refs custom-style="Bibliography"}
+:::
